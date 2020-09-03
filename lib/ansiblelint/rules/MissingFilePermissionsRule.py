@@ -19,44 +19,57 @@
 # THE SOFTWARE.
 from ansiblelint.rules import AnsibleLintRule
 
+# Despite documentation mentioning 'preserve' only these modules support it:
+_modules_with_preserve = (
+    'copy',
+    'ini_file',
+    'template',
+)
+
 
 class MissingFilePermissionsRule(AnsibleLintRule):
     id = "208"
-    shortdesc = 'File permissions not mentioned'
+    shortdesc = 'File permissions not mentioned or incorrect'
     description = (
-        "Missing mode parameter can cause unexpected file permissions based "
-        "on version of Ansible being used. Be explicit, or if you still "
-        "want the default behavior you can use ``mode: preserve`` to avoid "
-        "hitting this rule. See "
-        "https://github.com/ansible/ansible/issues/71200"
+        f"Missing or unsupported mode parameter can cause unexpected file "
+        f"permissions based "
+        f"on version of Ansible being used. Be explicit, like ``mode: 0644`` to "
+        f"avoid hitting this rule. Special ``preserve`` value is accepted "
+        f"only by {', '.join(_modules_with_preserve)} modules. "
+        f"See https://github.com/ansible/ansible/issues/71200"
     )
     severity = 'VERY_HIGH'
     tags = ['unpredictability']
     version_added = 'v4.3.0'
 
     _modules = (
-        'assemble',
         'archive',
-        'copy',
+        'assemble',
+        'copy',  # supports preserve
         'file',
-        'template',
+        'replace',  # implicit preserve behavior but mode: preserve is invalid
+        'template',  # supports preserve
         'unarchive',
     )
 
-    _modules_with_create = (
-        'blockinfile',
-        'ini_file',
-        'lineinfile'
-    )
+    _modules_with_create = {
+        'blockinfile': False,
+        'ini_file': True,  # supports preserve
+        'lineinfile': False,
+        'htpasswd': True,
+    }
 
     def matchtask(self, file, task):
-        if task["action"]["__ansible_module__"] not in self._modules and \
-                task["action"]["__ansible_module__"] not in self._modules_with_create:
+        module = task["action"]["__ansible_module__"]
+        mode = task['action'].get('mode', None)
+
+        if module not in self._modules and \
+                module not in self._modules_with_create:
             return False
 
-        if task["action"]["__ansible_module__"] in self._modules_with_create and \
-                not task["action"].get("create", False):
-            return False
+        if module in self._modules_with_create:
+            create = task["action"].get("create", self._modules_with_create[module])
+            return create and mode is None
 
         # A file that doesn't exist cannot have a mode
         if task['action'].get('state', None) == "absent":
@@ -66,10 +79,21 @@ class MissingFilePermissionsRule(AnsibleLintRule):
         if task['action'].get('state', None) == "link":
             return False
 
+        if mode == 'preserve' and module not in _modules_with_preserve:
+            return True
+
         # The file module does not create anything when state==file (default)
-        if task["action"]["__ansible_module__"] == "file" and \
+        if module == "file" and \
                 task['action'].get('state', 'file') == 'file':
             return False
 
-        mode = task['action'].get('mode', None)
+        # replace module is the only one that has a valid default preserve
+        # behavior, but we want to trigger rule if user used incorrect
+        # documentation and put 'preserve', which is not supported.
+        if module == 'replace' and mode is None:
+            return False
+
+        # if module == 'lineinfile' and
+        # print(555, module not in _modules_with_preserve)
+
         return mode is None
